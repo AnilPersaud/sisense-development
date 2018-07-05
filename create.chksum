@@ -1,0 +1,6 @@
+create table if not exists chksum (
+   file_name varchar(256) not null,
+   file_chksum varchar(32) not null,
+   file_imported timestamp not null default now(),
+   primary key (file_name)
+)

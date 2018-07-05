@@ -1,0 +1,142 @@
+#!/usr/bin/expect --
+
+if { $argc < 2 } {
+   send_user "Usage: $::argv0 <database> <table>\n"
+   exit 1
+}
+set DATABASE [lindex $argv 0]
+set TABLE [lindex $argv 1]
+set BASEDIR /STAGING/$DATABASE
+set FILEPATTERN $TABLE.txt
+if { [string match "stv" $TABLE] || [string match "off" $TABLE] } {
+   set FILEPATTERN $TABLE
+}
+catch {glob $BASEDIR/*.$FILEPATTERN} IFILES
+set MYSQL /usr/bin/mysql
+set MYSQL_USER root
+set MYSQL_PWSD M!cr0s0ft
+set MYSQL_CMD "$MYSQL"
+set GZIP /bin/gzip
+set BASENAME /usr/bin/basename
+set MD5SUM /usr/bin/md5sum
+set TABLE_CHKSUM chksum
+log_user 0
+
+send_user "DATABASE: $DATABASE\n"
+send_user "TABLE: $TABLE\n"
+send_user "BASEDIR: $BASEDIR\n"
+send_user "FILEPATTERN: $FILEPATTERN\n"
+
+if { ! [file exists $BASEDIR] } {
+   send_user "directory $BASEDIR not found\n"
+   exit 1
+}
+
+if { [string match "no files matched glob pattern*" $IFILES] } {
+   send_user "$IFILES\n"
+   exit 1
+}
+set IFILES [lsort $IFILES]
+
+spawn $MYSQL_CMD -p
+expect {
+   -re "Enter password" {
+      exp_send "$MYSQL_PWSD\n"
+      exp_continue
+   }
+   -re "Welcome to the MySQL monitor" {
+      exp_send "use $DATABASE;\n"
+      exp_continue
+   }
+   -re "Database changed" {
+      exp_send "desc $TABLE;\n"
+      exp_continue
+   }
+   -re "rows in set" {
+      exp_send "truncate table $TABLE;\n"
+      exp_continue
+   }
+   -re "Query OK, 0 rows affected" {
+   }
+   default {
+      exp_send "quit\n"
+      exit 1
+   }
+}
+
+exp_internal 0
+log_user 0
+set LINESTOIGNORE 1
+if { [string match "stv" $TABLE] || [string match "off" $TABLE] } {
+   set LINESTOIGNORE 0
+}
+
+# set timeout 120
+foreach IFILE $IFILES {
+   catch {exec $BASENAME $IFILE} BASENAME_RV
+   catch {exec $MD5SUM $IFILE} MD5SUM_RV
+   if { [string match "*No such file or directory" $MD5SUM_RV] } {
+      continue
+   }
+   set MD5SUM_RV [lindex [split $MD5SUM_RV " "] 0]
+   # unset expect_out(buffer)
+   exp_send "select * from $TABLE_CHKSUM where file_name = '$BASENAME_RV';\n"
+   expect {
+      -re "Empty set" { }
+      -re "row in set" {
+         send_user "SKIPPING $IFILE: name $BASENAME_RV exists\n"
+         continue
+      }
+      default {
+         send_user "SKIPPING $IFILE: name $BASENAME_RV exists\n"
+         continue
+      }
+   }
+   exp_send "select * from $TABLE_CHKSUM where file_chksum = '$MD5SUM_RV';\n"
+   expect {
+      -re "Empty set" { }
+      -re "row in set" {
+         send_user "SKIPPING $IFILE: chksum $MD5SUM_RV exists\n"
+         continue
+      }
+      default {
+         send_user "SKIPPING $IFILE: chksum $MD5SUM_RV exists\n"
+         continue
+      }
+   }
+   set NUMREC [lindex [split $IFILE "."] 3]
+   set NUMREC [string trimleft $NUMREC 0]
+   incr NUMREC 0
+   set SQL_LOAD "LOAD DATA LOCAL \
+                 INFILE '$IFILE' \
+                 INTO TABLE $TABLE \
+                 FIELDS TERMINATED BY '|' \
+                 IGNORE $LINESTOIGNORE LINES;"
+   send_user "$SQL_LOAD\n"
+   # unset expect_out(buffer)
+   set timeout_cnt 0
+   exp_send "$SQL_LOAD\n"
+   expect {
+      -re "Query OK.*$NUMREC rows affected" {
+         exp_send "insert into $TABLE_CHKSUM (file_name, file_chksum) values ('$BASENAME_RV', '$MD5SUM_RV');\n"
+         send_user "$expect_out(0,string)\n"
+         catch {exec $GZIP $IFILE} GZIP_RV
+      }
+      timeout {
+         incr timeout_cnt
+         if { $timeout_cnt < 30 } { exp_continue }
+      }
+      default {
+         send_user "$IFILE: Query not OK\n"
+      }
+   }
+}
+
+
+exp_send "quit\n"
+expect {
+   -re "Bye" {
+   }
+   default {
+   }
+}
